@@ -5,9 +5,8 @@
 """
 from __future__ import annotations
 
-import math
 import statistics
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.fixtures import (
@@ -15,7 +14,6 @@ from app.fixtures import (
     COHORT_USERS,
     DATA_MART_ROWS,
     DIMENSIONS,
-    EXPERIMENT_RESULTS,
     METRIC_DEFS,
     QUALITY_CHECK_SAMPLES,
     TREND_POINTS,
@@ -275,60 +273,68 @@ def run_cohort_extract_pipeline(rule: dict[str, Any] | None = None) -> dict[str,
 # ---------------------------------------------------------------------------
 
 def run_experiment_stat_pipeline(experiment_code: str | None = None) -> dict[str, Any]:
-    """读取实验 fixtures，执行双比例 z 检验与效应量计算，产物写入数据集市。"""
-    rows = list(EXPERIMENT_RESULTS)
+    """按观测期校验两组样本，只有都达标的观测期才执行 z 检验并同步数据集市。
+
+    - 不指定实验编号时逐个同步全部参与分析的实验；指定时只同步该实验。
+    - 未就绪的观测期只生成就绪快照与缺数组别，不写提升量、不发布显著性。
+    - 同一「实验 + 观测期」重复执行是覆盖更新，不会产生重复集市行。
+    """
+    from app.services.experiment_readiness import sync_all, sync_experiment
+
     if experiment_code is None:
-        experiment_code = "EXPE-001"
+        batch = sync_all()
+        _write_result("experiment_stat_mart", {
+            "source_modules": ["experiment", "stat_model"],
+            "target_module": "data_mart",
+            "payload": {
+                "mode": "all",
+                "experiment_count": batch["experiment_count"],
+                "synced": batch["synced"],
+                "experiments": {
+                    item["readiness"]["experiment_code"]: {
+                        "observation_period": item["readiness"]["observation_period"],
+                        "readiness_status": item["readiness"]["readiness_status"],
+                        "ready": item["readiness"]["ready"],
+                        "缺数组别": item["readiness"]["缺数组别"],
+                        "significant": (item["readiness"].get("statistics") or {}).get("significant"),
+                        "absolute_lift": item["readiness"]["lift"],
+                    }
+                    for item in batch["results"]
+                },
+            },
+        })
+        return build_stat_summary(batch)
 
-    exp_rows = [r for r in rows if r.get("实验编号") == experiment_code]
-    if len(exp_rows) < 2:
-        return {"error": "实验数据不足"}
-
-    control = next((r for r in exp_rows if r.get("分组") == "control"), None)
-    treatment = next((r for r in exp_rows if r.get("分组") == "treatment"), None)
-    if control is None or treatment is None:
-        return {"error": "缺少对照组或实验组"}
-
-    n_c = _to_int(control.get("样本量"))
-    n_t = _to_int(treatment.get("样本量"))
-    conv_c = _to_int(control.get("转化人数"))
-    conv_t = _to_int(treatment.get("转化人数"))
-
-    p_c = conv_c / n_c if n_c else 0.0
-    p_t = conv_t / n_t if n_t else 0.0
-    p_pool = (conv_c + conv_t) / (n_c + n_t) if (n_c + n_t) else 0.0
-    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n_c + 1 / n_t)) if (n_c + n_t) else 0.0
-    z = (p_t - p_c) / se if se else 0.0
-
-    # Cohen's h 效应量
-    cohen_h = 2 * (math.asin(math.sqrt(p_t)) - math.asin(math.sqrt(p_c))) if (p_t >= 0 and p_c >= 0) else 0.0
-
+    sync = sync_experiment(experiment_code)
+    readiness = sync["readiness"]
+    stats = readiness.get("statistics")
     result = {
         "experiment_code": experiment_code,
-        "control_rate": round(p_c, 4),
-        "treatment_rate": round(p_t, 4),
-        "absolute_lift": round(p_t - p_c, 4),
-        "relative_lift": round((p_t - p_c) / p_c, 4) if p_c else None,
-        "z_score": round(z, 4),
-        "cohen_h": round(cohen_h, 4),
-        "significant_at_05": abs(z) > 1.96,
-        "sample_size_control": n_c,
-        "sample_size_treatment": n_t,
+        "experiment_name": readiness["experiment_name"],
+        "observation_period": readiness["observation_period"],
+        "readiness_status": readiness["readiness_status"],
+        "ready": readiness["ready"],
+        "缺数组别": readiness["缺数组别"],
+        "缺数组别名称": readiness["缺数组别名称"],
+        "min_sample_per_group": readiness["min_sample_per_group"],
+        "sample_size_control": readiness["groups"]["control"]["sample_size"],
+        "sample_size_treatment": readiness["groups"]["treatment"]["sample_size"],
+        # 点估计属于检验过程本身，始终可读；「提升量 / 显著性」只有两组都达标才对外发布。
+        "control_rate": (stats or {}).get("control_rate"),
+        "treatment_rate": (stats or {}).get("treatment_rate"),
+        "effective_rates": readiness.get("effective_rates"),
+        "absolute_lift": (stats or {}).get("absolute_lift"),
+        "relative_lift": (stats or {}).get("relative_lift"),
+        "z_score": (stats or {}).get("z_score"),
+        "p_value": (stats or {}).get("p_value"),
+        "cohen_h": (stats or {}).get("cohen_h"),
+        "significant_at_05": (stats or {}).get("significant"),
+        "published_lift": readiness["lift"],
+        "published_significance": readiness["published_significance"],
+        "review_status": readiness["review_status"],
+        "conclusion": readiness["conclusion"],
+        "mart_updated": sync["mart_row"] is not None,
     }
-
-    # 同时写入 data_mart 可消费的统计摘要行
-    mart_entry = {
-        "主题编号": f"DATA-STAT-{experiment_code}",
-        "region": "all",
-        "channel": "all",
-        "日期": str(date.today()),
-        "实验编号": experiment_code,
-        "控制组转化率": result["control_rate"],
-        "实验组转化率": result["treatment_rate"],
-        "相对提升": result["relative_lift"],
-        "显著性": result["significant_at_05"],
-    }
-    store.rows("data_mart").append(mart_entry)
 
     _write_result("experiment_stat_mart", {
         "source_modules": ["experiment", "stat_model"],
@@ -336,6 +342,34 @@ def run_experiment_stat_pipeline(experiment_code: str | None = None) -> dict[str
         "payload": result,
     })
     return result
+
+
+def build_stat_summary(batch: dict[str, Any]) -> dict[str, Any]:
+    """把批量同步结果整理成管道摘要（含就绪与未就绪两部分）。"""
+    items = [item["readiness"] for item in batch["results"]]
+    ready = [item for item in items if item["ready"]]
+    return {
+        "mode": "all",
+        "generated_at": batch["generated_at"],
+        "experiment_count": batch["experiment_count"],
+        "synced_count": batch["synced"],
+        "ready_count": len(ready),
+        "not_ready_count": len(items) - len(ready),
+        "items": [
+            {
+                "experiment_code": item["experiment_code"],
+                "observation_period": item["observation_period"],
+                "readiness_status": item["readiness_status"],
+                "review_status": item["review_status"],
+                "ready": item["ready"],
+                "缺数组别": item["缺数组别"],
+                "effective_rates": item.get("effective_rates"),
+                "absolute_lift": item["lift"],
+                "published_significance": item["published_significance"],
+            }
+            for item in items
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

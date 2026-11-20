@@ -75,5 +75,36 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## AB实验就绪校验与试投排名
+
+实验统计不再直接拿两行数据做检验，而是先按观测期校验两组样本，再决定能否发布。
+
+- **按组门槛**：`实验管理` 的 `最小样本` 按组分计，对照组和实验组**各自**达到门槛，
+  本期才就绪；未就绪只输出缺数组别与样本缺口，不发布提升量或显著性。
+- **观测期隔离**：采集批次以「实验 × 观测期 × 分组」为单位登记。一次检验只使用同一个
+  观测期的两组记录；下一观测期迟到的批次留在自己的观测期里，不并入本期。
+- **复盘区分两种结论**：`样本未到齐`（未达门槛，没有检验结论）与
+  `已检验-不显著`（样本达标、检验完成且不显著）是两个不同状态。
+- **集市汇总**：统计管道把就绪状态同步到 `data_mart`，按期给有效转化率与提升量；
+  未就绪的实验保留缺数组别行，`可参与排名=false`、不带提升量。
+- **试投排名**：只对本期已就绪且已同步集市的实验按提升量排名，未参加排名的实验和原因
+  单独列出，并给出覆盖比例。
+
+主要接口：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/experiment-readiness/readiness` | 就绪数据集（按组样本、缺数组别、本期观测期） |
+| `POST /api/experiment-readiness/observations` | 登记采集批次（同批次号覆盖不累加） |
+| `GET /api/experiment-readiness/observations` | 查询采集批次 |
+| `POST /api/experiment-readiness/sync` | 校验并同步集市（同一实验同一观测期幂等） |
+| `GET /api/experiment-readiness/review/{实验编号}` | 复盘记录，区分样本未到齐与已检验不显著 |
+| `GET /api/experiment-readiness/ranking` | 试投排名、可安排名单与未参加排名的实验 |
+| `POST /api/experiment/{id}/min-sample` | 调整按组最小样本门槛 |
+| `GET /api/experiment-mart` | 集市按期汇总（有效转化率、提升量、缺数组别） |
+| `GET /api/experiment-mart/coverage` | 排名覆盖与未参加排名的原因 |
+| `POST /api/pipeline/experiment-stat` | 统计管道；不传实验编号时同步全部参与分析的实验 |
+
+
 领域：数据工程
 子方向：数据分析与数据应用

@@ -11,6 +11,14 @@ from app.seed import SEED_ROWS
 
 class Store:
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """按种子数据重建全部表。
+
+        原地重置而不是重新绑定全局对象：各模块通过 ``from app.store import store``
+        持有的是同一个实例，重新绑定会让它们继续读写旧实例，测试之间互相污染。
+        """
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
@@ -18,6 +26,10 @@ class Store:
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
+
+    def public_module_names(self) -> list[str]:
+        """业务模块列表：内部表（下划线开头）不属于运营概览口径。"""
+        return [name for name in self.module_names() if not name.startswith("_")]
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
@@ -30,7 +42,7 @@ class Store:
 
     def overview(self) -> dict[str, object]:
         modules: list[dict[str, object]] = []
-        for name in self.module_names():
+        for name in self.public_module_names():
             rows = self.rows(name)
             modules.append({
                 "name": name,
@@ -51,6 +63,9 @@ store = Store()
 
 
 def reset_store() -> None:
-    """重新初始化全局 store，用于测试隔离。"""
-    global store
-    store = Store()
+    """原地重置全局 store，用于测试隔离。
+
+    模块里都是 ``from app.store import store``，必须重置同一个实例；
+    不能重新创建并绑定新对象，否则各模块手上还是旧实例。
+    """
+    store.reset()

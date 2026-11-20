@@ -41,6 +41,14 @@ class ExperimentService:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
         if missing:
             return None, missing
+        # 最小样本按组分计，登记时就挡住非法值，避免运行中才发现门槛不成立。
+        min_sample = values.get("最小样本")
+        if min_sample not in (None, ""):
+            try:
+                if int(float(str(min_sample))) <= 0:
+                    raise ValueError
+            except ValueError:
+                return None, ["最小样本（需为大于 0 的整数，按组计）"]
         rows = store.rows(MODULE)
         entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
         entry.update({field: values.get(field) for field in LIST_FIELDS})
@@ -49,6 +57,20 @@ class ExperimentService:
         entry["abnormal"] = False
         rows.append(entry)
         return entry, []
+
+    def update_min_sample(self, entry_id: int, value: Any) -> tuple[dict[str, Any] | None, str]:
+        """更新按组最小样本量；就绪校验会立刻按新门槛重算。"""
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"AB实验 {entry_id} 不存在或已归档"
+        try:
+            parsed = int(float(str(value)))
+        except (TypeError, ValueError):
+            return None, "最小样本量必须是大于 0 的整数（按组计）"
+        if parsed <= 0:
+            return None, "最小样本量必须是大于 0 的整数（按组计）"
+        entry["最小样本"] = str(parsed)
+        return entry, f"最小样本量已设为每组 {parsed} 人"
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)

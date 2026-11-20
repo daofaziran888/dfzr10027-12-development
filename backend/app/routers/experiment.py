@@ -83,6 +83,16 @@ def create_entry(payload: dict[str, object]) -> ActionResult:
     return ActionResult(ok=True, message="AB实验已登记", entry=entry)
 
 
+@router.post("/{entry_id}/min-sample", response_model=ActionResult)
+def update_min_sample(entry_id: int, payload: dict[str, object]) -> ActionResult:
+    """调整该实验的按组最小样本门槛；两组各自达到新门槛才发布显著性。"""
+    value = payload.get("最小样本", payload.get("min_sample"))
+    entry, message = service.update_min_sample(entry_id, value)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     """对单条AB实验执行启动实验、终止实验、归档结果；不允许的动作会被拦下并说明原因。"""
